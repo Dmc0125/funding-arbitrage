@@ -1,0 +1,3 @@
+[workspace]
+members = ["third-party/*", "funding-program", "bot"]
+resolver = "2"

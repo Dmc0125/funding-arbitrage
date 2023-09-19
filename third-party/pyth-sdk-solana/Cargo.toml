@@ -1,0 +1,32 @@
+[package]
+name = "pyth-sdk-solana"
+version = "0.8.0"
+authors = ["Pyth Data Foundation"]
+edition = "2021"
+license = "Apache-2.0"
+homepage = "https://pyth.network"
+repository = "https://github.com/pyth-network/pyth-sdk-rs"
+description = "pyth price oracle data structures and example usage"
+keywords = ["pyth", "solana", "oracle"]
+readme = "README.md"
+
+[dependencies]
+solana-program = "1.16.7"
+borsh = "0.10.3"
+borsh-derive = "0.10.3"
+bytemuck = "1.7.2"
+num-derive = "0.3"
+num-traits = "0.2"
+thiserror = "1.0"
+serde = { version = "1.0.136", features = ["derive"] }
+pyth-sdk = { path = "../pyth-sdk", version = "0.8.0" }
+
+[dev-dependencies]
+solana-client = "1.16.7"
+solana-sdk = "1.16.7"
+
+[lib]
+crate-type = ["cdylib", "lib"]
+
+[package.metadata.docs.rs]
+targets = ["x86_64-unknown-linux-gnu"]

@@ -1,0 +1,10 @@
+[package]
+name = "mango"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anchor_client_gen = "0.1.2"
+anchor-lang = "0.28.0"
+bytemuck = { version = "^1.7.2", features = ["min_const_generics"] }
+fixed = "1.23.1"

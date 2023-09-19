@@ -1,0 +1,27 @@
+[package]
+name = "bot"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "bot"
+path = "src/lib.rs"
+
+[[bin]]
+name = "bot"
+path = "src/bin/main.rs"
+
+[dependencies]
+solana-sdk = "1.16.12"
+solana-client = "1.16.12"
+solana-transaction-status = "1.16.12"
+solana-account-decoder = "1.16.12"
+anchor-lang = "0.28.0"
+serde = "1.0.188"
+fixed = "1.23.1"
+base64 = "0.21.2"
+futures = "0.3.28"
+tokio-tungstenite = { version = "0.20.0", features = ["native-tls"] }
+tokio-stream = "0.1.14"
+futures-util = "0.3.28"
+tokio = { version = "1.14.1", features = ["full"] }

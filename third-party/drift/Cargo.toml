@@ -1,0 +1,9 @@
+[package]
+name = "drift"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anchor_client_gen = "0.1.2"
+anchor-lang = "0.28.0"
+uint = { version = "0.9.5", default-features = false }
