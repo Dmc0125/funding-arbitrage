@@ -2,6 +2,13 @@ use solana_client::client_error::ClientError;
 
 #[derive(Debug)]
 pub enum Error {
+    UnableToCreateOutputFile,
+    UnableToLoadOutputFile,
+    UnableToSaveOutputFile,
+
+    UnableToDecode,
+    UnableToDeserialize,
+
     TransactionError,
 
     RpcError,

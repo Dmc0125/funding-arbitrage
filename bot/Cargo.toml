@@ -16,6 +16,7 @@ solana-sdk = "1.16.12"
 solana-client = "1.16.12"
 solana-transaction-status = "1.16.12"
 solana-account-decoder = "1.16.12"
+solana-rpc-client-api = "1.16.12"
 anchor-lang = "0.28.0"
 serde = "1.0.188"
 fixed = "1.23.1"
@@ -25,3 +26,9 @@ tokio-tungstenite = { version = "0.20.0", features = ["native-tls"] }
 tokio-stream = "0.1.14"
 futures-util = "0.3.28"
 tokio = { version = "1.14.1", features = ["full"] }
+clap = { version = "4.4.4", features = ["derive"] }
+dotenv = "0.15.0"
+serde_json = "1.0.107"
+funding-program = { package = "funding-program", path = "../funding-program", features = [
+    "cpi",
+] }
