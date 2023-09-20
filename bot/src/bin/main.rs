@@ -1,12 +1,19 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, sync::Arc};
 
 use bot::{
+    addresses::StaticAddresses,
     args::{self, CliArgs, Commands, Wallet},
     error::Error,
-    utils::websocket_client::WebsocketClient,
+    state::{
+        fetch_mango_book_sides, fetch_markets, subscribe_to_drift_markets,
+        subscribe_to_mango_book_sides, subscribe_to_mango_markets, subscribe_to_oracles, State,
+    },
+    utils::websocket_client::{create_persisted_websocket_connection, WebsocketClient},
 };
 use clap::Parser;
+use drift::accounts::PerpMarket as DriftPerpMarket;
 use funding_program::{client::state::load_funding_account, state::Exchange};
+use mango::accounts::PerpMarket as MangoPerpMarket;
 use solana_client::nonblocking::rpc_client::RpcClient;
 use solana_sdk::{
     commitment_config::CommitmentConfig, pubkey::Pubkey, signature::Keypair, signer::Signer,
@@ -16,18 +23,17 @@ use tokio::{
     io::AsyncWriteExt,
 };
 
-#[tokio::main]
-async fn main() -> Result<(), Error> {
+fn main() -> Result<(), Error> {
     let cli_args = CliArgs::parse();
     dotenv::dotenv().ok();
 
     let rpc_client = args::load_and_parse("RPC_URL", |url| {
-        Ok(RpcClient::new_with_commitment(
+        Ok(Arc::new(RpcClient::new_with_commitment(
             url,
             CommitmentConfig::confirmed(),
-        ))
+        )))
     });
-    let ws_client = args::load_and_parse("WS_URL", |url| Ok(WebsocketClient::new(url)));
+    let ws_client = args::load_and_parse("WS_URL", |url| Ok(Arc::new(WebsocketClient::new(url))));
     let wallet = args::load_and_parse("PRIVATE_KEY", |pk_str| {
         let bytes = pk_str
             .split(",")
@@ -35,9 +41,9 @@ async fn main() -> Result<(), Error> {
             .collect::<Result<Vec<u8>, &str>>()?;
         let keypair = Keypair::from_bytes(&bytes).map_err(|_| "Invalid private key")?;
         let pubkey = keypair.try_pubkey().unwrap();
-        Ok(Wallet { keypair, pubkey })
+        Ok(Arc::new(Wallet { keypair, pubkey }))
     });
-    let (mango_markets, drift_markets) = args::load_and_parse("MARKETS", |markets| {
+    let (mango_markets_ids, drift_markets_ids) = args::load_and_parse("MARKETS", |markets| {
         let markets = markets.split(",").map(|x| x.to_string()).collect();
         Ok((
             args::parse_mango_markets_into_ids(&markets).map_err(|e| e.to_string())?,
@@ -45,6 +51,29 @@ async fn main() -> Result<(), Error> {
         ))
     });
 
+    tokio::runtime::Builder::new_multi_thread()
+        .thread_stack_size(4 * 1024 * 1024)
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(start(
+            cli_args,
+            rpc_client,
+            ws_client,
+            wallet,
+            mango_markets_ids,
+            drift_markets_ids,
+        ))
+}
+
+async fn start(
+    cli_args: CliArgs,
+    rpc_client: Arc<RpcClient>,
+    ws_client: Arc<WebsocketClient>,
+    _wallet: Arc<Wallet>,
+    mango_markets_ids: Vec<u16>,
+    drift_markets_ids: Vec<u16>,
+) -> Result<(), Error> {
     match cli_args.commands {
         // outputs funding accounts to a file
         //
@@ -126,7 +155,85 @@ async fn main() -> Result<(), Error> {
                 }
             }
         }
-        Commands::FundingClient => {}
+        Commands::FundingClient => {
+            let websocket_handle = create_persisted_websocket_connection(ws_client.clone()).await?;
+
+            let mango_markets_addresses =
+                StaticAddresses::get_mango_markets_from_ids(mango_markets_ids);
+            let drift_markets_addresses =
+                StaticAddresses::get_drift_markets_from_ids(drift_markets_ids);
+
+            let mut static_addresses = StaticAddresses::new();
+            let (state, state_update_sender, state_update_receiver) = State::new();
+
+            let mango_markets =
+                fetch_markets::<MangoPerpMarket>(&rpc_client, mango_markets_addresses).await?;
+            static_addresses.set_mango_markets(&mango_markets);
+            state.set_initial_mango_markets(mango_markets).await;
+            let mango_markets_subscription_handle = subscribe_to_mango_markets(
+                ws_client.clone(),
+                &static_addresses,
+                state_update_sender.clone(),
+            );
+
+            let drift_markets =
+                fetch_markets::<DriftPerpMarket>(&rpc_client, drift_markets_addresses).await?;
+            static_addresses.set_drift_markets(&drift_markets);
+            state.set_initial_drift_markets(drift_markets).await;
+            let drift_markets_subscription_handle = subscribe_to_drift_markets(
+                ws_client.clone(),
+                &static_addresses,
+                state_update_sender.clone(),
+            );
+
+            let mango_book_sides = fetch_mango_book_sides(&rpc_client, &static_addresses).await?;
+            state.set_initial_mango_book_sides(mango_book_sides).await;
+            let mango_book_sides_subscription_handle = subscribe_to_mango_book_sides(
+                ws_client.clone(),
+                &static_addresses,
+                state_update_sender.clone(),
+            );
+
+            let oracles_subscription_handle =
+                subscribe_to_oracles(ws_client, &static_addresses, state_update_sender);
+
+            let state = Arc::new(state);
+            let state_handle =
+                State::subscribe_to_state_updates(state.clone(), state_update_receiver);
+
+            let program_res = tokio::select! {
+                websocket_res = websocket_handle => {
+                    websocket_res.map(|r| r.map_err(|e| e.into()))
+                }
+                mango_markets_res = mango_markets_subscription_handle => {
+                    mango_markets_res
+                }
+                drift_markets_res = drift_markets_subscription_handle => {
+                    drift_markets_res
+                }
+                mango_book_sides_res = mango_book_sides_subscription_handle => {
+                    mango_book_sides_res
+                }
+                oracles_res = oracles_subscription_handle => {
+                    oracles_res
+                }
+                _ = state_handle => {
+                    println!("State subscription shutdown unexpectedly");
+                    Ok(Ok(()))
+                }
+            };
+
+            match program_res {
+                Ok(res) => {
+                    res?;
+                }
+                Err(e) => {
+                    dbg!(e);
+                }
+            }
+
+            return Err(Error::ServiceShutdownUnexpectedly);
+        }
         Commands::Bot => {}
     }
 

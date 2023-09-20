@@ -28,6 +28,21 @@ pub enum WebsocketError {
     MessageParseError(serde_json::error::Error),
 }
 
+impl ToString for WebsocketError {
+    fn to_string(&self) -> String {
+        match self {
+            Self::AlreadyConnected => "AlreadyConnected".to_string(),
+            Self::NotConnected => "NotConnected".to_string(),
+            Self::SubscriptionFailed(msg) => format!("SubscriptionFailed: {}", msg),
+            Self::ConnectionCouldNotBeEstablished(msg) => {
+                format!("ConnectionCouldNotBeEstablished: {}", msg)
+            }
+            Self::SendError(e) => format!("SendError: {}", e.to_string()),
+            Self::MessageParseError(e) => format!("MessageParseError: {}", e.to_string()),
+        }
+    }
+}
+
 impl From<tokio_tungstenite::tungstenite::Error> for WebsocketError {
     fn from(value: tokio_tungstenite::tungstenite::Error) -> Self {
         Self::SendError(value)
