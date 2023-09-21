@@ -1,4 +1,4 @@
-use std::{collections::HashMap, future::ready, sync::Arc};
+use std::{collections::HashMap, future::ready, sync::Arc, time::Duration};
 
 use futures::{SinkExt, StreamExt};
 use futures_util::stream::BoxStream;
@@ -13,6 +13,7 @@ use solana_sdk::pubkey::Pubkey;
 use tokio::{
     sync::{broadcast, mpsc, Mutex},
     task::JoinHandle,
+    time::sleep,
 };
 use tokio_stream::wrappers::UnboundedReceiverStream;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
@@ -294,6 +295,9 @@ pub async fn create_persisted_websocket_connection(
                         println!("Subscribing {}: {}", &method, request_id);
                         pending_subscriptions.insert(request_id, PendingSubscription { method, status_sender });
                         request_id += 1;
+                    }
+                    _ = sleep(Duration::from_secs(5)) => {
+                        ws.send(Message::Ping(vec![])).await?;
                     }
                     Some(msg) = ws.next() => {
                         let text = match msg? {

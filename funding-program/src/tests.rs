@@ -244,7 +244,7 @@ async fn update_err_wrong_authority(
 
     let blockhash = rpc_client.get_latest_blockhash().await?;
 
-    let ixs = [instructions::update_funding_accounts(
+    let ixs = [instructions::update_funding_account(
         instructions::UpdateFundingAccountAccounts {
             authority: fake_wallet.pubkey,
             funding_account: drift_address,
@@ -273,14 +273,14 @@ async fn update_success(
     let blockhash = rpc_client.get_latest_blockhash().await?;
 
     let ixs = [
-        instructions::update_funding_accounts(
+        instructions::update_funding_account(
             instructions::UpdateFundingAccountAccounts {
                 authority: wallet.pubkey,
                 funding_account: drift_address,
             },
             10_0000,
         ),
-        instructions::update_funding_accounts(
+        instructions::update_funding_account(
             instructions::UpdateFundingAccountAccounts {
                 authority: wallet.pubkey,
                 funding_account: mango_address,
@@ -315,7 +315,7 @@ async fn update_err_too_soon(
 ) -> Result<(), Error> {
     let blockhash = rpc_client.get_latest_blockhash().await?;
 
-    let ixs = [instructions::update_funding_accounts(
+    let ixs = [instructions::update_funding_account(
         instructions::UpdateFundingAccountAccounts {
             authority: wallet.pubkey,
             funding_account: drift_address,

@@ -1,6 +1,6 @@
 use solana_client::client_error::ClientError;
 
-use crate::utils::websocket_client::WebsocketError;
+use crate::utils::{transaction::TransactionErrorClient, websocket_client::WebsocketError};
 
 #[derive(Debug)]
 pub enum Error {
@@ -20,6 +20,7 @@ pub enum Error {
 
     RpcError,
     WebsocketClientError(WebsocketError),
+    TransactionErrorClient(TransactionErrorClient),
 }
 
 impl From<ClientError> for Error {
@@ -31,6 +32,12 @@ impl From<ClientError> for Error {
 impl From<WebsocketError> for Error {
     fn from(value: WebsocketError) -> Self {
         Self::WebsocketClientError(value)
+    }
+}
+
+impl From<TransactionErrorClient> for Error {
+    fn from(value: TransactionErrorClient) -> Self {
+        Self::TransactionErrorClient(value)
     }
 }
 
@@ -48,6 +55,7 @@ impl ToString for Error {
             Self::TransactionError => "TransactionError".to_string(),
             Self::RpcError => "RpcError".to_string(),
             Self::WebsocketClientError(e) => format!("WebsocketClientError: {}", e.to_string()),
+            Self::TransactionErrorClient(e) => format!("TransactionErrorClient: {}", e.to_string()),
         }
     }
 }

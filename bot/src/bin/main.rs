@@ -4,6 +4,7 @@ use bot::{
     addresses::StaticAddresses,
     args::{self, CliArgs, Commands, Wallet},
     error::Error,
+    services::funding_relayer::{initialize_funding_accounts_if_needed, start_funding_relayer},
     state::{
         fetch_mango_book_sides, fetch_markets, subscribe_to_drift_markets,
         subscribe_to_mango_book_sides, subscribe_to_mango_markets, subscribe_to_oracles, State,
@@ -70,7 +71,7 @@ async fn start(
     cli_args: CliArgs,
     rpc_client: Arc<RpcClient>,
     ws_client: Arc<WebsocketClient>,
-    _wallet: Arc<Wallet>,
+    wallet: Arc<Wallet>,
     mango_markets_ids: Vec<u16>,
     drift_markets_ids: Vec<u16>,
 ) -> Result<(), Error> {
@@ -111,8 +112,8 @@ async fn start(
                 })?;
 
                 let exchange = match account.exchange {
-                    Exchange::Drift => "drift",
-                    Exchange::Mango => "mango",
+                    Exchange::Drift => "drift (0)",
+                    Exchange::Mango => "mango (1)",
                 };
                 let meta = format!(
                     "{}: {} {} {}\n",
@@ -201,7 +202,21 @@ async fn start(
             let state_handle =
                 State::subscribe_to_state_updates(state.clone(), state_update_receiver);
 
-            let program_res = tokio::select! {
+            initialize_funding_accounts_if_needed(
+                &rpc_client,
+                &wallet,
+                &static_addresses.funding_accounts,
+            )
+            .await?;
+            let (relayer_cache_handle, relayer_handle) = start_funding_relayer(
+                rpc_client,
+                wallet,
+                state,
+                &static_addresses.funding_accounts,
+            )
+            .await?;
+
+            let program_result = tokio::select! {
                 websocket_res = websocket_handle => {
                     websocket_res.map(|r| r.map_err(|e| e.into()))
                 }
@@ -221,9 +236,15 @@ async fn start(
                     println!("State subscription shutdown unexpectedly");
                     Ok(Ok(()))
                 }
+                relayer_cache_res = relayer_cache_handle => {
+                    relayer_cache_res
+                }
+                relayer_res = relayer_handle => {
+                    relayer_res
+                }
             };
 
-            match program_res {
+            match program_result {
                 Ok(res) => {
                     res?;
                 }

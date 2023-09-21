@@ -1,1 +1,13 @@
 <account_address>: <id> <market_index> <exchange> (<exchange_discriminant>)
+
+Authority: CDWTLttbdfBLq3bpdmKwJBGbzzjKkcAeqFZ5GCqib5jz
+--------------------------------
+BWNkq13NgcmQwHK4c1EZZMb3Rzqw1qyctFHtmNw8nCmx: 0 2 drift (0)
+DTNaNycmLy8gQuSdCWE5yJbKZLc5mSKBBkpVu1oGrXzo: 0 0 drift (0)
+HAVqqQXwepP5CEdmahmtz9sdyY4UQvYZr1xRtjqhF6Ai: 0 3 mango (1)
+7fAroqgax7CPszN5ZPnaeGLoddD2bCvEfU5ApkKU2mB5: 0 0 mango (1)
+CjKZ63S5pJiSfRuugviT2aNNAkoBPbvgNft5tr1NX2YM: 0 2 mango (1)
+FAstsKcRBHq7N8CQN9u3zUuPj9Jo4Z6UZqXJ5ZQudmxZ: 0 12 drift (0)
+ASDxUtY37eKwoJF1H9NCv91yzNPd4fGaL17w7KCWfRa2: 0 4 mango (1)
+91wQZzrndNS6cr1WQUPdtwFLt8zVRCfosvKoUhFAV83: 0 1 drift (0)
+

@@ -53,6 +53,17 @@ pub enum DriftError {
     InvalidFundingProfitability,
 }
 
+impl ToString for DriftError {
+    fn to_string(&self) -> String {
+        match self {
+            Self::MathError => "MathError".to_string(),
+            Self::InvalidOracle => "InvalidOracle".to_string(),
+            Self::InvalidMarkTwapUpdateDetected => "InvalidMarkTwapUpdateDetected".to_string(),
+            Self::InvalidFundingProfitability => "InvalidFundingProfitability".to_string(),
+        }
+    }
+}
+
 pub type DriftResult<T> = Result<T, DriftError>;
 
 impl types::Amm {

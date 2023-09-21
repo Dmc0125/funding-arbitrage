@@ -23,16 +23,27 @@ use tokio::time::sleep;
 use crate::{args::Wallet, error::Error};
 
 #[derive(Debug)]
-pub enum ClientTransactionError {
+pub enum TransactionErrorClient {
     UnableToCompile,
     MissingSigner,
     MissingSignature,
     RpcError,
 }
 
-impl From<ClientError> for ClientTransactionError {
+impl From<ClientError> for TransactionErrorClient {
     fn from(_: ClientError) -> Self {
         Self::RpcError
+    }
+}
+
+impl ToString for TransactionErrorClient {
+    fn to_string(&self) -> String {
+        match self {
+            Self::UnableToCompile => "UnableToCompile".to_string(),
+            Self::MissingSigner => "MissingSigner".to_string(),
+            Self::MissingSignature => "MissingSignature".to_string(),
+            Self::RpcError => "RpcError".to_string(),
+        }
     }
 }
 
@@ -41,7 +52,7 @@ pub async fn build_signed_transaction(
     signer: &Arc<Wallet>,
     instructions: &[Instruction],
     address_lookup_tables: &[AddressLookupTableAccount],
-) -> Result<VersionedTransaction, ClientTransactionError> {
+) -> Result<VersionedTransaction, TransactionErrorClient> {
     let blockhash = rpc_client.get_latest_blockhash().await?;
     let message = Message::try_compile(
         &signer.pubkey,
@@ -49,13 +60,13 @@ pub async fn build_signed_transaction(
         address_lookup_tables,
         blockhash,
     )
-    .map_err(|_| ClientTransactionError::UnableToCompile)?;
+    .map_err(|_| TransactionErrorClient::UnableToCompile)?;
 
     let tx = VersionedTransaction::try_new(VersionedMessage::V0(message), &[&signer.keypair])
-        .map_err(|_| ClientTransactionError::MissingSigner)?;
+        .map_err(|_| TransactionErrorClient::MissingSigner)?;
 
     tx.sanitize(true)
-        .map_err(|_| ClientTransactionError::MissingSignature)?;
+        .map_err(|_| TransactionErrorClient::MissingSignature)?;
 
     Ok(tx)
 }
@@ -134,5 +145,41 @@ pub async fn send_and_confirm_transaction(
                 }
             }
         }
+    }
+}
+
+pub async fn force_send_transaction(
+    rpc_client: &Arc<RpcClient>,
+    wallet: &Arc<Wallet>,
+    instructions: Vec<Instruction>,
+    alts: &Vec<AddressLookupTableAccount>,
+) -> Result<(Signature, UiTransactionStatusMeta), Error> {
+    let mut retries = 0_u8;
+    let mut tx = build_signed_transaction(rpc_client, wallet, &instructions[..], alts).await?;
+
+    loop {
+        if retries % 2 == 0 {
+            tx = build_signed_transaction(rpc_client, wallet, &instructions[..], alts).await?;
+        }
+
+        match send_and_confirm_transaction(rpc_client, &tx).await? {
+            TransactionResult::Error(signature, e) => {
+                println!(
+                    "Transaction error: {} - error: {}",
+                    signature,
+                    e.to_string()
+                );
+                return Err(Error::TransactionError);
+            }
+            TransactionResult::Success(signature, meta) => {
+                println!("Transaction success: {}", signature);
+                return Ok((signature, meta));
+            }
+            TransactionResult::Timeout(signature) => {
+                println!("Transaction timeout: {} - Resending transaction", signature)
+            }
+        }
+
+        retries += 1;
     }
 }

@@ -10,7 +10,7 @@ use solana_rpc_client_api::{
     filter::{Memcmp, RpcFilterType},
 };
 use solana_sdk::{commitment_config::CommitmentConfig, pubkey::Pubkey};
-use std::{str::FromStr, sync::Arc};
+use std::{str::FromStr, sync::Arc, time::Instant};
 use tokio::{
     sync::{mpsc, Mutex},
     task::JoinHandle,
@@ -28,6 +28,7 @@ pub struct OraclePriceData {
     pub expo: i32,
     pub price: i64,
     pub updated_at_slot: u64,
+    pub updated_at_ts: Instant,
     pub confidence: u64,
 }
 
@@ -38,6 +39,7 @@ impl From<&pyth_sdk_solana::state::PriceAccount> for OraclePriceData {
             price: value.agg.price,
             updated_at_slot: value.last_slot,
             confidence: value.agg.conf,
+            updated_at_ts: Instant::now(),
         }
     }
 }
@@ -164,6 +166,53 @@ impl State {
         *self.mango_book_sides.lock().await = book_sides;
     }
 
+    pub async fn get_drift_market_and_oracle(
+        &self,
+        market_address: Pubkey,
+    ) -> Option<(DriftPerpMarket, OraclePriceData)> {
+        let drift_markets = self.drift_markets.lock().await;
+        let market = drift_markets
+            .iter()
+            .find(|(addr, _)| addr == &market_address);
+
+        if let Some((_, market)) = market {
+            let oracles = self.oracles.lock().await;
+
+            if let Some((_, oracle)) = oracles.iter().find(|(addr, _)| addr == &market.amm.oracle) {
+                return Some((market.clone(), *oracle));
+            }
+        }
+
+        None
+    }
+
+    pub async fn get_mango_market_with_components(
+        &self,
+        market_address: Pubkey,
+    ) -> Option<(MangoPerpMarket, BookSide, BookSide, OraclePriceData)> {
+        let mango_markets = self.mango_markets.lock().await;
+        let Some((_, market)) = mango_markets
+            .iter()
+            .find(|(addr, _)| addr == &market_address)
+        else {
+            return None;
+        };
+
+        let oracles = self.oracles.lock().await;
+        let Some((_, oracle)) = oracles.iter().find(|(addr, _)| addr == &market.oracle) else {
+            return None;
+        };
+
+        let book_sides = self.mango_book_sides.lock().await;
+        let bids = book_sides.iter().find(|(addr, _)| addr == &market.bids);
+        let asks = book_sides.iter().find(|(addr, _)| addr == &market.asks);
+
+        match (bids, asks) {
+            (Some((_, bids)), Some((_, asks))) => Some((market.clone(), *bids, *asks, *oracle)),
+            _ => None,
+        }
+    }
+
     pub fn subscribe_to_state_updates(
         state: Arc<State>,
         mut receiver: StateUpdateReceiver,
@@ -172,19 +221,19 @@ impl State {
             while let Some(update_message) = receiver.recv().await {
                 match update_message {
                     StateUpdateMessage::Oracle(address, new_oracle) => {
-                        println!("Updating oracle");
+                        // println!("Updating oracle");
                         update_state_account!(state.oracles, address, new_oracle);
                     }
                     StateUpdateMessage::DriftMarket(address, new_market) => {
-                        println!("Updating drift market");
+                        // println!("Updating drift market");
                         update_state_account!(state.drift_markets, address, new_market);
                     }
                     StateUpdateMessage::MangoMarket(address, new_market) => {
-                        println!("Updating mango market");
+                        // println!("Updating mango market");
                         update_state_account!(state.mango_markets, address, new_market);
                     }
                     StateUpdateMessage::MangoBookSide(address, new_book_side) => {
-                        println!("Updating book side");
+                        // println!("Updating book side");
                         update_state_account!(state.mango_book_sides, address, new_book_side);
                     }
                 }
@@ -273,6 +322,7 @@ pub fn subscribe_to_oracles(
 
     tokio::spawn(async move {
         loop {
+            println!("Subscribing to oracles");
             let (_, mut stream) = ws_client
                 .program_subscribe(constants::pyth::id(), config.clone())
                 .await?;
@@ -306,6 +356,8 @@ pub fn subscribe_to_oracles(
                     err.to_string()
                 );
             }
+
+            println!("Oracles sub closed");
         }
     })
 }
@@ -320,6 +372,7 @@ pub fn subscribe_to_drift_markets(
 
     tokio::spawn(async move {
         loop {
+            println!("Subscribing to drift markets");
             let (_, mut stream) = ws_client
                 .program_subscribe(drift::id(), config.clone())
                 .await?;
@@ -340,6 +393,8 @@ pub fn subscribe_to_drift_markets(
                     .send(StateUpdateMessage::DriftMarket(address, parsed))
                     .ok();
             }
+
+            println!("Drift markets sub closed");
         }
     })
 }
@@ -354,6 +409,7 @@ pub fn subscribe_to_mango_markets(
 
     tokio::spawn(async move {
         loop {
+            println!("Subscribing to mango markets");
             let (_, mut stream) = ws_client
                 .program_subscribe(mango::id(), config.clone())
                 .await?;
@@ -374,6 +430,8 @@ pub fn subscribe_to_mango_markets(
                     .send(StateUpdateMessage::MangoMarket(address, parsed))
                     .ok();
             }
+
+            println!("Mango sub closed");
         }
     })
 }
@@ -392,6 +450,7 @@ pub fn subscribe_to_mango_book_sides(
 
     tokio::spawn(async move {
         loop {
+            println!("Subscribing to mango booksides");
             let (_, mut stream) = ws_client
                 .program_subscribe(mango::id(), config.clone())
                 .await?;
@@ -412,6 +471,8 @@ pub fn subscribe_to_mango_book_sides(
                     .send(StateUpdateMessage::MangoBookSide(address, parsed))
                     .ok();
             }
+
+            println!("Mango booksides sub closed");
         }
     })
 }
