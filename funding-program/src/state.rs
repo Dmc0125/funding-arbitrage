@@ -7,6 +7,7 @@ use std::{
 use borsh::{BorshDeserialize, BorshSerialize};
 use solana_program::{
     account_info::AccountInfo,
+    msg,
     program_error::ProgramError,
     program_memory::{sol_memcpy, sol_memmove},
     pubkey::Pubkey,
@@ -87,6 +88,18 @@ pub struct FundingAccountConfig {
     /// (data_point - prev_ema) * 2 / (period + 1) + prev_ema
     pub period_length: u32,
     pub data_points_count: u16,
+}
+
+impl FundingAccountConfig {
+    pub fn log(&self) {
+        msg!("update_frequency_secs: {}", self.update_frequency_secs);
+        msg!(
+            "staleness_threshold_secs: {}",
+            self.staleness_threshold_secs
+        );
+        msg!("period_length: {}", self.period_length);
+        msg!("data_points_count: {}", self.data_points_count);
+    }
 }
 
 #[derive(Copy, Clone, Default, BorshDeserialize, BorshSerialize)]
@@ -267,6 +280,18 @@ impl<'a, 'info: 'a> FundingAccountLoader<'a, 'info> {
         self.fixed
             .serialize(&mut writer)
             .map_err(|_| ProgramError::InvalidAccountData.into())
+    }
+
+    pub fn log(&self) {
+        msg!("bump: {}", self.fixed.bump);
+        msg!("id: {}", self.fixed.id);
+        msg!("exchange: {:?}", self.fixed.exchange);
+        msg!("market_index: {}", self.fixed.market_index);
+        msg!("authority: {}", self.fixed.authority);
+        msg!("last_updated_ts: {}", self.fixed.last_updated_ts);
+        msg!("funding_ema: {:?}", self.fixed.funding_ema);
+
+        self.fixed.config.log();
     }
 }
 

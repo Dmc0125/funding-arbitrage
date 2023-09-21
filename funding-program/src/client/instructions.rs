@@ -122,9 +122,7 @@ pub fn update_funding_account(
     accounts: UpdateFundingAccountAccounts,
     data_point: i64,
 ) -> Instruction {
-    let data = InstructionData::UpdateFundingData {
-        data_point_5m: data_point,
-    };
+    let data = InstructionData::UpdateFundingData { data_point };
     let accounts = vec![
         AccountMeta {
             pubkey: accounts.authority,

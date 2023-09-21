@@ -80,9 +80,9 @@ pub fn process_instruction(
             processor::configure_funding_account_authority(accounts, authority)?;
             Ok(())
         }
-        InstructionData::UpdateFundingData { data_point_5m } => {
+        InstructionData::UpdateFundingData { data_point } => {
             log_instruction("UpdateFundingAccount");
-            processor::update_funding(accounts, data_point_5m)?;
+            processor::update_funding(accounts, data_point)?;
             Ok(())
         }
         InstructionData::CloseFundingAccount => {

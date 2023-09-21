@@ -24,7 +24,7 @@ pub enum InstructionData {
         authority: Pubkey,
     },
     UpdateFundingData {
-        data_point_5m: i64,
+        data_point: i64,
     },
     CloseFundingAccount,
 }

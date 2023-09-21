@@ -121,6 +121,9 @@ pub fn initialize_funding_account(
         data_points_count,
     };
 
+    msg!("Initialized funding account");
+    funding_account.log();
+
     funding_account.save()?;
 
     Ok(())
@@ -161,8 +164,6 @@ pub fn configure_funding_account<'a, 'info>(
             config.period_length = new_period_length;
 
             funding_account.save()?;
-
-            Ok(())
         }
         Some(new_count) => {
             if new_count <= 1 {
@@ -244,10 +245,10 @@ pub fn configure_funding_account<'a, 'info>(
             }
 
             funding_account.save()?;
-
-            Ok(())
         }
     }
+
+    Ok(())
 }
 
 pub fn configure_funding_account_authority<'a, 'info>(
@@ -261,6 +262,7 @@ pub fn configure_funding_account_authority<'a, 'info>(
         FundingAccountLoader::try_load(next_account_info(&mut accounts_iter)?, signer_ai.key)?;
 
     funding_account.fixed.authority = authority;
+    msg!("Updated authority: {}", authority.to_string());
 
     funding_account.save()?;
     Ok(())
@@ -298,6 +300,9 @@ pub fn update_funding<'a, 'info>(
 
     funding_account.update_data_points(data_point)?;
     funding_account.fixed.last_updated_ts = now_ts;
+
+    msg!("Added new data point: {}", data_point);
+    msg!("Updated EMA: {:?}", funding_account.fixed.funding_ema);
 
     funding_account.save()?;
     Ok(())

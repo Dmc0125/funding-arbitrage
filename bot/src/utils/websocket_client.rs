@@ -151,7 +151,6 @@ pub struct WebsocketClient {
 
     unsubscribe_sender: broadcast::Sender<UnsubscribeRequest>,
     subscribe_sender: broadcast::Sender<SubscribeRequest>,
-    pending_backlog: Mutex<Vec<SubscribeRequest>>,
 }
 
 impl WebsocketClient {
@@ -161,7 +160,6 @@ impl WebsocketClient {
 
         Self {
             connection_status: Default::default(),
-            pending_backlog: Default::default(),
             url,
             subscribe_sender,
             unsubscribe_sender,
@@ -265,15 +263,6 @@ pub async fn create_persisted_websocket_connection(
             let mut pending_unsubscriptions: HashMap<RequestId, UnsubscriptionStatusSender> =
                 HashMap::default();
 
-            {
-                let mut backlog = client.pending_backlog.lock().await;
-                dbg!(&backlog);
-                let backlog_len = backlog.len();
-                backlog.drain(0..backlog_len).for_each(|req| {
-                    client.subscribe_sender.send(req).ok();
-                });
-            }
-
             loop {
                 tokio::select! {
                     Ok((subscription_id, status_sender)) = unsubscribe_receiver.recv() => {
@@ -300,7 +289,10 @@ pub async fn create_persisted_websocket_connection(
                         ws.send(Message::Ping(vec![])).await?;
                     }
                     Some(msg) = ws.next() => {
-                        let text = match msg? {
+                        let Ok(msg) = msg else {
+                            break;
+                        };
+                        let text = match msg {
                             Message::Text(v) => v,
                             Message::Ping(data) => {
                                 ws.send(Message::Pong(data)).await?;
