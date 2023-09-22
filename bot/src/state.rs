@@ -10,10 +10,15 @@ use solana_rpc_client_api::{
     filter::{Memcmp, RpcFilterType},
 };
 use solana_sdk::{commitment_config::CommitmentConfig, pubkey::Pubkey};
-use std::{str::FromStr, sync::Arc, time::Instant};
+use std::{
+    str::FromStr,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 use tokio::{
     sync::{mpsc, Mutex},
     task::JoinHandle,
+    time::sleep,
 };
 
 use crate::{
@@ -45,7 +50,7 @@ impl From<&pyth_sdk_solana::state::PriceAccount> for OraclePriceData {
 }
 
 impl OraclePriceData {
-    pub const STALENESS_THRESHOLD: u64 = 40;
+    pub const STALENESS_THRESHOLD_SECS: u64 = 30;
 
     pub fn get_drift_price(&self) -> Result<i64, Error> {
         use drift::constants::PRICE_PRECISION;
@@ -86,29 +91,6 @@ impl OraclePriceData {
 
         I80F48::from_num(self.price) * decimal_adj
     }
-
-    //     pub fn validate_staleness(&self, address: &Pubkey, slot: u64) -> Result<(), SharedError> {
-    //         if self.updated_at_slot + Self::STALENESS_THRESHOLD < slot {
-    //             let unix_timestamp = self
-    //                 .updated_at_ts
-    //                 .duration_since(SystemTime::UNIX_EPOCH)
-    //                 .unwrap();
-    //             let timestamp: DateTime<Utc> = Utc
-    //                 .timestamp_opt(
-    //                     unix_timestamp.as_secs() as i64,
-    //                     unix_timestamp.subsec_nanos(),
-    //                 )
-    //                 .unwrap();
-    //             let formatted = timestamp.format("%Y-%m-%d %H:%M:%S").to_string();
-    //             println!(
-    //                 "Oracle {} is stale - Last update: {}",
-    //                 address.to_string(),
-    //                 formatted
-    //             );
-    //             return Err(SharedError::OracleIsStale);
-    //         }
-    //         Ok(())
-    //     }
 }
 
 macro_rules! update_state_account {
@@ -315,12 +297,31 @@ pub fn subscribe_to_oracles(
     ws_client: Arc<WebsocketClient>,
     static_addresses: &StaticAddresses,
     state_update_sender: StateUpdateSender,
-) -> SubscriptionHandle {
+) -> futures::future::SelectAll<JoinHandle<Result<(), Error>>> {
     let oracles_addresses = static_addresses.oracles.clone();
     let pyth_magic = pyth_sdk_solana::state::MAGIC.to_le_bytes().to_vec();
     let config = get_program_subscribe_config(pyth_magic.clone());
+    let last_update = Arc::new(Mutex::new(Instant::now()));
 
-    tokio::spawn(async move {
+    let monitor_handle: JoinHandle<Result<(), Error>> = tokio::spawn({
+        let reconnect_threshold = OraclePriceData::STALENESS_THRESHOLD_SECS / 2;
+        let ws_client = ws_client.clone();
+        let last_update = last_update.clone();
+        async move {
+            loop {
+                let last_update = last_update.lock().await;
+
+                if last_update.elapsed().as_secs() > reconnect_threshold {
+                    ws_client.reconnect().await?;
+                }
+
+                drop(last_update);
+                sleep(Duration::from_secs(10)).await;
+            }
+        }
+    });
+
+    let sub_handle: JoinHandle<Result<(), Error>> = tokio::spawn(async move {
         loop {
             println!("Subscribing to oracles");
             let (_, mut stream) = ws_client
@@ -337,6 +338,7 @@ pub fn subscribe_to_oracles(
                 let err = match AccountData::decode(&payload.value.account.data) {
                     Ok(bytes) => match pyth_sdk_solana::state::load_price_account(&bytes[..]) {
                         Ok(price_account) => {
+                            *last_update.lock().await = Instant::now();
                             state_update_sender
                                 .send(StateUpdateMessage::Oracle(
                                     address,
@@ -359,7 +361,9 @@ pub fn subscribe_to_oracles(
 
             println!("Oracles sub closed");
         }
-    })
+    });
+
+    futures::future::select_all([monitor_handle, sub_handle])
 }
 
 pub fn subscribe_to_drift_markets(

@@ -158,7 +158,7 @@ pub async fn force_send_transaction(
     let mut tx = build_signed_transaction(rpc_client, wallet, &instructions[..], alts).await?;
 
     loop {
-        if retries % 2 == 0 {
+        if retries % 2 == 0 && retries > 0 {
             tx = build_signed_transaction(rpc_client, wallet, &instructions[..], alts).await?;
         }
 

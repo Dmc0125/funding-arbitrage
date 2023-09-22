@@ -22,7 +22,7 @@ use crate::{
     addresses::FundingAccountMeta,
     args::Wallet,
     error::Error,
-    state::State,
+    state::{OraclePriceData, State},
     utils::transaction::{
         build_signed_transaction, force_send_transaction, send_and_confirm_transaction,
         TransactionResult,
@@ -196,12 +196,15 @@ pub async fn start_funding_relayer(
                                 );
                                 continue;
                             };
-                            // TODO: Validate oracle staleness
-                            if oracle.updated_at_ts.elapsed().as_secs() > 30 {
+
+                            if oracle.updated_at_ts.elapsed().as_secs()
+                                > OraclePriceData::STALENESS_THRESHOLD_SECS
+                            {
                                 println!(
                                     "Oracle drift {} {} is stale",
                                     perp_market.market_index, perp_market.amm.oracle
                                 );
+                                continue;
                             }
 
                             let Ok(price) = oracle.get_drift_price() else {
@@ -241,12 +244,14 @@ pub async fn start_funding_relayer(
                                 continue;
                             };
 
-                            // TODO: Validate oracle staleness
-                            if oracle.updated_at_ts.elapsed().as_secs() > 30 {
+                            if oracle.updated_at_ts.elapsed().as_secs()
+                                > OraclePriceData::STALENESS_THRESHOLD_SECS
+                            {
                                 println!(
                                     "Oracle mango {} {} is stale",
                                     perp_market.perp_market_index, perp_market.oracle
                                 );
+                                continue;
                             }
 
                             let price = oracle.get_mango_price(perp_market.base_decimals);

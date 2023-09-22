@@ -196,7 +196,7 @@ async fn start(
             );
 
             let oracles_subscription_handle =
-                subscribe_to_oracles(ws_client, &static_addresses, state_update_sender);
+                subscribe_to_oracles(ws_client.clone(), &static_addresses, state_update_sender);
 
             let state = Arc::new(state);
             let state_handle =
@@ -229,7 +229,7 @@ async fn start(
                 mango_book_sides_res = mango_book_sides_subscription_handle => {
                     mango_book_sides_res
                 }
-                oracles_res = oracles_subscription_handle => {
+                (oracles_res, _, _) = oracles_subscription_handle => {
                     oracles_res
                 }
                 _ = state_handle => {

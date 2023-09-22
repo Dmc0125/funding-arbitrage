@@ -16,7 +16,13 @@ use tokio::{
     time::sleep,
 };
 use tokio_stream::wrappers::UnboundedReceiverStream;
-use tokio_tungstenite::{connect_async, tungstenite::Message};
+use tokio_tungstenite::{
+    connect_async,
+    tungstenite::{
+        protocol::{frame::coding::CloseCode, CloseFrame},
+        Message,
+    },
+};
 
 #[derive(Debug)]
 pub enum WebsocketError {
@@ -25,7 +31,7 @@ pub enum WebsocketError {
     SubscriptionFailed(String),
     ConnectionCouldNotBeEstablished(String),
 
-    SendError(tokio_tungstenite::tungstenite::Error),
+    ConnectionError(tokio_tungstenite::tungstenite::Error),
     MessageParseError(serde_json::error::Error),
 }
 
@@ -38,7 +44,7 @@ impl ToString for WebsocketError {
             Self::ConnectionCouldNotBeEstablished(msg) => {
                 format!("ConnectionCouldNotBeEstablished: {}", msg)
             }
-            Self::SendError(e) => format!("SendError: {}", e.to_string()),
+            Self::ConnectionError(e) => format!("SendError: {}", e.to_string()),
             Self::MessageParseError(e) => format!("MessageParseError: {}", e.to_string()),
         }
     }
@@ -46,7 +52,7 @@ impl ToString for WebsocketError {
 
 impl From<tokio_tungstenite::tungstenite::Error> for WebsocketError {
     fn from(value: tokio_tungstenite::tungstenite::Error) -> Self {
-        Self::SendError(value)
+        Self::ConnectionError(value)
     }
 }
 
@@ -151,19 +157,34 @@ pub struct WebsocketClient {
 
     unsubscribe_sender: broadcast::Sender<UnsubscribeRequest>,
     subscribe_sender: broadcast::Sender<SubscribeRequest>,
+    reconnect_sender: broadcast::Sender<mpsc::Sender<()>>,
 }
 
 impl WebsocketClient {
     pub fn new(url: String) -> Self {
         let (subscribe_sender, _) = broadcast::channel(100);
         let (unsubscribe_sender, _) = broadcast::channel(100);
+        let (reconnect_sender, _) = broadcast::channel(1);
 
         Self {
             connection_status: Default::default(),
             url,
             subscribe_sender,
             unsubscribe_sender,
+            reconnect_sender,
         }
+    }
+
+    pub async fn reconnect(&self) -> Result<(), WebsocketError> {
+        let (status_sender, mut status_receiver) = mpsc::channel(1);
+
+        self.reconnect_sender
+            .send(status_sender)
+            .map_err(|_| WebsocketError::NotConnected)?;
+
+        status_receiver.recv().await;
+
+        Ok(())
     }
 
     pub async fn program_subscribe(
@@ -243,13 +264,19 @@ pub async fn create_persisted_websocket_connection(
         type RequestId = u64;
         type SubscriptionId = u64;
 
-        let mut request_id: RequestId = 1;
+        // TODO:
+        // Can potentially remain pending forever if websocket reconnects
+        // while the subscription is pending
         let mut pending_subscriptions: HashMap<RequestId, PendingSubscription> = HashMap::new();
+        let mut pending_reconnect: Option<mpsc::Sender<()>> = None;
 
         let mut subscribe_receiver = client.subscribe_sender.subscribe();
         let mut unsubscribe_receiver = client.unsubscribe_sender.subscribe();
+        let mut reconnect_receiver = client.reconnect_sender.subscribe();
 
         loop {
+            let mut request_id: RequestId = 1;
+
             println!("Connecting to ws");
             let mut conn_status = client.connection_status.lock().await;
             let (mut ws, _response) = connect_async(&client.url)
@@ -258,6 +285,11 @@ pub async fn create_persisted_websocket_connection(
             *conn_status = ConnectionStatus::Connected;
             drop(conn_status);
 
+            if let Some(status_sender) = pending_reconnect {
+                status_sender.send(()).await.ok();
+                pending_reconnect = None;
+            }
+
             let mut active_subscriptions: HashMap<SubscriptionId, ActiveSubscription> =
                 HashMap::new();
             let mut pending_unsubscriptions: HashMap<RequestId, UnsubscriptionStatusSender> =
@@ -265,6 +297,19 @@ pub async fn create_persisted_websocket_connection(
 
             loop {
                 tokio::select! {
+                    Ok(status_sender) = reconnect_receiver.recv() =>
+                    {
+                        #[allow(unused_assignments)]
+                        {
+                            pending_reconnect = Some(status_sender);
+                        }
+
+                        let frame = CloseFrame { code: CloseCode::Normal, reason: "".into() };
+                        ws.send(Message::Close(Some(frame))).await?;
+                        ws.flush().await?;
+
+                        break;
+                    }
                     Ok((subscription_id, status_sender)) = unsubscribe_receiver.recv() => {
                         let Some(ActiveSubscription { method, .. }) = active_subscriptions.remove(&subscription_id) else {
                             status_sender.send(()).await.ok();
@@ -290,6 +335,7 @@ pub async fn create_persisted_websocket_connection(
                     }
                     Some(msg) = ws.next() => {
                         let Ok(msg) = msg else {
+                            println!("Websocket message error: {}", msg.err().unwrap().to_string());
                             break;
                         };
                         let text = match msg {
