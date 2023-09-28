@@ -1,32 +1,14 @@
+use std::sync::Arc;
+
 use anchor_lang::{AccountDeserialize, Discriminator};
 use drift::accounts::PerpMarket as DriftPerpMarket;
 use fixed::types::I80F48;
-use futures_util::StreamExt;
 use mango::accounts::{BookSide, PerpMarket as MangoPerpMarket};
-use solana_account_decoder::UiAccountEncoding;
 use solana_client::nonblocking::rpc_client::RpcClient;
-use solana_rpc_client_api::{
-    config::{RpcAccountInfoConfig, RpcProgramAccountsConfig},
-    filter::{Memcmp, RpcFilterType},
-};
-use solana_sdk::{commitment_config::CommitmentConfig, pubkey::Pubkey};
-use std::{
-    str::FromStr,
-    sync::Arc,
-    time::{Duration, Instant},
-};
-use tokio::{
-    sync::{mpsc, Mutex},
-    task::JoinHandle,
-    time::sleep,
-};
+use solana_sdk::pubkey::Pubkey;
+use tokio::{sync::RwLock, time::Instant};
 
-use crate::{
-    addresses::StaticAddresses,
-    constants,
-    error::Error,
-    utils::{deser::AccountData, websocket_client::WebsocketClient},
-};
+use crate::{addresses::StaticAddresses, error::Error, utils::deser::AccountData};
 
 #[derive(Clone, Copy, Debug)]
 pub struct OraclePriceData {
@@ -50,8 +32,6 @@ impl From<&pyth_sdk_solana::state::PriceAccount> for OraclePriceData {
 }
 
 impl OraclePriceData {
-    pub const STALENESS_THRESHOLD_SECS: u64 = 30;
-
     pub fn get_drift_price(&self) -> Result<i64, Error> {
         use drift::constants::PRICE_PRECISION;
 
@@ -93,73 +73,163 @@ impl OraclePriceData {
     }
 }
 
-macro_rules! update_state_account {
-    ($state_mutex: expr, $address: expr, $new_account: expr) => {
-        let mut accounts = $state_mutex.lock().await;
+pub async fn fetch_markets<T: AccountDeserialize + Discriminator>(
+    rpc_client: &Arc<RpcClient>,
+    markets: &Vec<Pubkey>,
+) -> Result<Vec<(Pubkey, T)>, Error> {
+    let ais = rpc_client.get_multiple_accounts(&markets).await?;
+    let mut parsed = vec![];
 
-        if let Some((_, state)) = accounts.iter_mut().find(|(addr, _)| addr == &$address) {
-            *state = $new_account;
+    for (i, ai) in ais.iter().enumerate() {
+        let address = &markets[i];
+        if let Some(ai) = ai {
+            let market = AccountData::from(ai).parse().map_err(|e| {
+                println!("Unable to deserialize market account: {}", address);
+                e
+            })?;
+            parsed.push((*address, market));
         } else {
-            accounts.push(($address, $new_account));
+            println!("Perp market account does not exist: {}", address);
+            return Err(Error::UnableToFetchAccount);
         }
-    };
+    }
+
+    Ok(parsed)
 }
 
-pub enum StateUpdateMessage {
-    Oracle(Pubkey, OraclePriceData),
-    DriftMarket(Pubkey, DriftPerpMarket),
-    MangoMarket(Pubkey, MangoPerpMarket),
-    MangoBookSide(Pubkey, BookSide),
-}
-
-pub type StateUpdateSender = mpsc::UnboundedSender<StateUpdateMessage>;
-pub type StateUpdateReceiver = mpsc::UnboundedReceiver<StateUpdateMessage>;
-
-#[derive(Debug)]
 pub struct State {
-    pub drift_markets: Mutex<Vec<(Pubkey, DriftPerpMarket)>>,
-    pub mango_markets: Mutex<Vec<(Pubkey, MangoPerpMarket)>>,
-    pub mango_book_sides: Mutex<Vec<(Pubkey, BookSide)>>,
-    pub oracles: Mutex<Vec<(Pubkey, OraclePriceData)>>,
+    rpc_client: Arc<RpcClient>,
+    pub static_addresses: StaticAddresses,
+
+    pub drift_markets: RwLock<Vec<(Pubkey, DriftPerpMarket)>>,
+    pub mango_markets: RwLock<Vec<(Pubkey, MangoPerpMarket)>>,
+    pub oracles: RwLock<Vec<(Pubkey, OraclePriceData)>>,
+    pub book_sides: RwLock<Vec<(Pubkey, BookSide)>>,
 }
 
 impl State {
-    pub fn new() -> (State, StateUpdateSender, StateUpdateReceiver) {
-        let state = Self {
-            drift_markets: Mutex::new(vec![]),
-            mango_markets: Mutex::new(vec![]),
-            mango_book_sides: Mutex::new(vec![]),
-            oracles: Mutex::new(vec![]),
-        };
-        let (update_sender, update_receiver) = mpsc::unbounded_channel();
-
-        (state, update_sender, update_receiver)
+    pub fn new(rpc_client: Arc<RpcClient>, static_addresses: StaticAddresses) -> Self {
+        Self {
+            rpc_client,
+            static_addresses,
+            drift_markets: RwLock::new(vec![]),
+            mango_markets: RwLock::new(vec![]),
+            oracles: RwLock::new(vec![]),
+            book_sides: RwLock::new(vec![]),
+        }
     }
 
-    pub async fn set_initial_drift_markets(&self, markets: Vec<(Pubkey, DriftPerpMarket)>) {
-        *self.drift_markets.lock().await = markets;
+    pub async fn update_drift_markets(state: Arc<State>) -> Result<(), Error> {
+        *state.drift_markets.write().await = fetch_markets::<DriftPerpMarket>(
+            &state.rpc_client,
+            &state.static_addresses.drift_markets,
+        )
+        .await?;
+
+        Ok(())
     }
 
-    pub async fn set_initial_mango_markets(&self, markets: Vec<(Pubkey, MangoPerpMarket)>) {
-        *self.mango_markets.lock().await = markets;
+    pub async fn update_mango_markets(state: Arc<State>) -> Result<(), Error> {
+        *state.mango_markets.write().await = fetch_markets::<MangoPerpMarket>(
+            &state.rpc_client,
+            &state.static_addresses.mango_markets,
+        )
+        .await?;
+        Ok(())
     }
 
-    pub async fn set_initial_mango_book_sides(&self, book_sides: Vec<(Pubkey, BookSide)>) {
-        *self.mango_book_sides.lock().await = book_sides;
+    pub async fn update_oracles(state: Arc<State>) -> Result<(), Error> {
+        let oracles = &state.static_addresses.oracles;
+        let ais = state.rpc_client.get_multiple_accounts(oracles).await?;
+        let mut parsed = vec![];
+
+        for (i, ai) in ais.iter().enumerate() {
+            let address = &oracles[i];
+            if let Some(ai) = ai {
+                match pyth_sdk_solana::state::load_price_account(&ai.data[..]) {
+                    Ok(price_account) => {
+                        parsed.push((*address, OraclePriceData::from(price_account)));
+                    }
+                    Err(e) => {
+                        println!(
+                            "Unable to parse oracle account {}: {}",
+                            address,
+                            e.to_string()
+                        )
+                    }
+                };
+            } else {
+                println!("Perp market account does not exist: {}", address);
+                return Err(Error::UnableToFetchAccount);
+            }
+        }
+
+        *state.oracles.write().await = parsed;
+        Ok(())
+    }
+
+    pub async fn update_mango_book_sides(state: Arc<State>) -> Result<(), Error> {
+        let book_sides_addresses = &state.static_addresses.mango_book_sides;
+        let ais = state
+            .rpc_client
+            .get_multiple_accounts(
+                &book_sides_addresses
+                    .iter()
+                    .map(|(_, addr, _)| *addr)
+                    .collect::<Vec<Pubkey>>(),
+            )
+            .await?;
+
+        let mut book_sides = vec![];
+
+        for (i, ai) in ais.iter().enumerate() {
+            let address = book_sides_addresses[i].1;
+            if let Some(ai) = ai {
+                book_sides.push((
+                    address,
+                    AccountData::from(ai).parse().map_err(|e| {
+                        println!("Unable to deserialize mango book side account: {}", address);
+                        e
+                    })?,
+                ))
+            } else {
+                println!("Mango book side does not exist: {}", address);
+                return Err(Error::UnableToFetchAccount);
+            }
+        }
+
+        *state.book_sides.write().await = book_sides;
+
+        Ok(())
+    }
+
+    pub async fn update_for_funding_snapshot(state: &Arc<State>) -> Result<(), Error> {
+        let (r1, r2, r3, r4) = tokio::join!(
+            State::update_drift_markets(state.clone()),
+            State::update_mango_markets(state.clone()),
+            State::update_mango_book_sides(state.clone()),
+            State::update_oracles(state.clone()),
+        );
+
+        r1?;
+        r2?;
+        r3?;
+        r4?;
+
+        Ok(())
     }
 
     pub async fn get_drift_market_and_oracle(
         &self,
         market_address: Pubkey,
     ) -> Option<(DriftPerpMarket, OraclePriceData)> {
-        let drift_markets = self.drift_markets.lock().await;
+        let drift_markets = self.drift_markets.read().await;
         let market = drift_markets
             .iter()
             .find(|(addr, _)| addr == &market_address);
 
         if let Some((_, market)) = market {
-            let oracles = self.oracles.lock().await;
-
+            let oracles = self.oracles.read().await;
             if let Some((_, oracle)) = oracles.iter().find(|(addr, _)| addr == &market.amm.oracle) {
                 return Some((market.clone(), *oracle));
             }
@@ -172,7 +242,7 @@ impl State {
         &self,
         market_address: Pubkey,
     ) -> Option<(MangoPerpMarket, BookSide, BookSide, OraclePriceData)> {
-        let mango_markets = self.mango_markets.lock().await;
+        let mango_markets = self.mango_markets.read().await;
         let Some((_, market)) = mango_markets
             .iter()
             .find(|(addr, _)| addr == &market_address)
@@ -180,12 +250,12 @@ impl State {
             return None;
         };
 
-        let oracles = self.oracles.lock().await;
+        let oracles = self.oracles.read().await;
         let Some((_, oracle)) = oracles.iter().find(|(addr, _)| addr == &market.oracle) else {
             return None;
         };
 
-        let book_sides = self.mango_book_sides.lock().await;
+        let book_sides = self.book_sides.read().await;
         let bids = book_sides.iter().find(|(addr, _)| addr == &market.bids);
         let asks = book_sides.iter().find(|(addr, _)| addr == &market.asks);
 
@@ -194,289 +264,4 @@ impl State {
             _ => None,
         }
     }
-
-    pub fn subscribe_to_state_updates(
-        state: Arc<State>,
-        mut receiver: StateUpdateReceiver,
-    ) -> JoinHandle<()> {
-        tokio::spawn(async move {
-            while let Some(update_message) = receiver.recv().await {
-                match update_message {
-                    StateUpdateMessage::Oracle(address, new_oracle) => {
-                        // println!("Updating oracle");
-                        update_state_account!(state.oracles, address, new_oracle);
-                    }
-                    StateUpdateMessage::DriftMarket(address, new_market) => {
-                        // println!("Updating drift market");
-                        update_state_account!(state.drift_markets, address, new_market);
-                    }
-                    StateUpdateMessage::MangoMarket(address, new_market) => {
-                        // println!("Updating mango market");
-                        update_state_account!(state.mango_markets, address, new_market);
-                    }
-                    StateUpdateMessage::MangoBookSide(address, new_book_side) => {
-                        // println!("Updating book side");
-                        update_state_account!(state.mango_book_sides, address, new_book_side);
-                    }
-                }
-            }
-        })
-    }
-}
-
-pub async fn fetch_markets<T: AccountDeserialize + Discriminator>(
-    rpc_client: &Arc<RpcClient>,
-    markets: Vec<Pubkey>,
-) -> Result<Vec<(Pubkey, T)>, Error> {
-    let ais = rpc_client.get_multiple_accounts(&markets).await?;
-    let mut parsed = vec![];
-
-    for (i, ai) in ais.iter().enumerate() {
-        let address = &markets[i];
-        if let Some(ai) = ai {
-            let market = AccountData::from(ai).parse()?;
-            parsed.push((*address, market));
-        } else {
-            println!("Mango perp market does not exist: {}", address);
-            return Err(Error::UnableToFetchAccount);
-        }
-    }
-
-    Ok(parsed)
-}
-
-pub async fn fetch_mango_book_sides(
-    rpc_client: &Arc<RpcClient>,
-    static_addresses: &StaticAddresses,
-) -> Result<Vec<(Pubkey, BookSide)>, Error> {
-    let book_sides_addresses = &static_addresses.mango_book_sides;
-    let ais = rpc_client
-        .get_multiple_accounts(
-            &book_sides_addresses
-                .iter()
-                .map(|(_, addr, _)| *addr)
-                .collect::<Vec<Pubkey>>(),
-        )
-        .await?;
-
-    let mut book_sides = vec![];
-
-    for (i, ai) in ais.iter().enumerate() {
-        let address = book_sides_addresses[i].0;
-        if let Some(ai) = ai {
-            book_sides.push((address, AccountData::from(ai).parse()?))
-        } else {
-            println!("Mango book side does not exist: {}", address);
-            return Err(Error::UnableToFetchAccount);
-        }
-    }
-
-    Ok(book_sides)
-}
-
-fn get_program_subscribe_config(discriminator: Vec<u8>) -> RpcProgramAccountsConfig {
-    RpcProgramAccountsConfig {
-        filters: Some(vec![RpcFilterType::Memcmp(Memcmp::new_raw_bytes(
-            0,
-            discriminator,
-        ))]),
-        account_config: RpcAccountInfoConfig {
-            encoding: Some(UiAccountEncoding::Base64),
-            commitment: Some(CommitmentConfig::confirmed()),
-            data_slice: None,
-            min_context_slot: None,
-        },
-        with_context: None,
-    }
-}
-
-pub type SubscriptionHandle = JoinHandle<Result<(), Error>>;
-
-// TODO: handle staleness
-pub fn subscribe_to_oracles(
-    ws_client: Arc<WebsocketClient>,
-    static_addresses: &StaticAddresses,
-    state_update_sender: StateUpdateSender,
-) -> futures::future::SelectAll<JoinHandle<Result<(), Error>>> {
-    let oracles_addresses = static_addresses.oracles.clone();
-    let pyth_magic = pyth_sdk_solana::state::MAGIC.to_le_bytes().to_vec();
-    let config = get_program_subscribe_config(pyth_magic.clone());
-    let last_update = Arc::new(Mutex::new(Instant::now()));
-
-    let monitor_handle: JoinHandle<Result<(), Error>> = tokio::spawn({
-        let reconnect_threshold = OraclePriceData::STALENESS_THRESHOLD_SECS / 2;
-        let ws_client = ws_client.clone();
-        let last_update = last_update.clone();
-        async move {
-            loop {
-                let last_update = last_update.lock().await;
-
-                if last_update.elapsed().as_secs() > reconnect_threshold {
-                    ws_client.reconnect().await?;
-                }
-
-                drop(last_update);
-                sleep(Duration::from_secs(10)).await;
-            }
-        }
-    });
-
-    let sub_handle: JoinHandle<Result<(), Error>> = tokio::spawn(async move {
-        loop {
-            println!("Subscribing to oracles");
-            let (_, mut stream) = ws_client
-                .program_subscribe(constants::pyth::id(), config.clone())
-                .await?;
-
-            while let Some(payload) = stream.next().await {
-                let address = Pubkey::from_str(&payload.value.pubkey).unwrap();
-
-                if !oracles_addresses.contains(&address) {
-                    continue;
-                }
-
-                let err = match AccountData::decode(&payload.value.account.data) {
-                    Ok(bytes) => match pyth_sdk_solana::state::load_price_account(&bytes[..]) {
-                        Ok(price_account) => {
-                            *last_update.lock().await = Instant::now();
-                            state_update_sender
-                                .send(StateUpdateMessage::Oracle(
-                                    address,
-                                    OraclePriceData::from(price_account),
-                                ))
-                                .ok();
-                            continue;
-                        }
-                        Err(e) => e.to_string(),
-                    },
-                    Err(e) => e.to_string(),
-                };
-
-                println!(
-                    "Unable to parse oracle {} - error: {}",
-                    address,
-                    err.to_string()
-                );
-            }
-
-            println!("Oracles sub closed");
-        }
-    });
-
-    futures::future::select_all([monitor_handle, sub_handle])
-}
-
-pub fn subscribe_to_drift_markets(
-    ws_client: Arc<WebsocketClient>,
-    static_addresses: &StaticAddresses,
-    state_update_sender: StateUpdateSender,
-) -> SubscriptionHandle {
-    let addresses = static_addresses.drift_markets.clone();
-    let config = get_program_subscribe_config(DriftPerpMarket::discriminator().to_vec());
-
-    tokio::spawn(async move {
-        loop {
-            println!("Subscribing to drift markets");
-            let (_, mut stream) = ws_client
-                .program_subscribe(drift::id(), config.clone())
-                .await?;
-
-            while let Some(payload) = stream.next().await {
-                let address = Pubkey::from_str(&payload.value.pubkey).unwrap();
-
-                if !addresses.contains(&address) {
-                    continue;
-                }
-
-                let Ok(parsed) = AccountData::from(&payload.value.account).parse() else {
-                    println!("Unable to parse drift market account {}", address);
-                    continue;
-                };
-
-                state_update_sender
-                    .send(StateUpdateMessage::DriftMarket(address, parsed))
-                    .ok();
-            }
-
-            println!("Drift markets sub closed");
-        }
-    })
-}
-
-pub fn subscribe_to_mango_markets(
-    ws_client: Arc<WebsocketClient>,
-    static_addresses: &StaticAddresses,
-    state_update_sender: StateUpdateSender,
-) -> SubscriptionHandle {
-    let addresses = static_addresses.mango_markets.clone();
-    let config = get_program_subscribe_config(MangoPerpMarket::discriminator().to_vec());
-
-    tokio::spawn(async move {
-        loop {
-            println!("Subscribing to mango markets");
-            let (_, mut stream) = ws_client
-                .program_subscribe(mango::id(), config.clone())
-                .await?;
-
-            while let Some(payload) = stream.next().await {
-                let address = Pubkey::from_str(&payload.value.pubkey).unwrap();
-
-                if !addresses.contains(&address) {
-                    continue;
-                }
-
-                let Ok(parsed) = AccountData::from(&payload.value.account).parse() else {
-                    println!("Unable to parse mango market account {}", address);
-                    continue;
-                };
-
-                state_update_sender
-                    .send(StateUpdateMessage::MangoMarket(address, parsed))
-                    .ok();
-            }
-
-            println!("Mango sub closed");
-        }
-    })
-}
-
-pub fn subscribe_to_mango_book_sides(
-    ws_client: Arc<WebsocketClient>,
-    static_addresses: &StaticAddresses,
-    state_update_sender: StateUpdateSender,
-) -> SubscriptionHandle {
-    let addresses = static_addresses
-        .mango_book_sides
-        .iter()
-        .map(|(_, address, _)| *address)
-        .collect::<Vec<Pubkey>>();
-    let config = get_program_subscribe_config(BookSide::discriminator().to_vec());
-
-    tokio::spawn(async move {
-        loop {
-            println!("Subscribing to mango booksides");
-            let (_, mut stream) = ws_client
-                .program_subscribe(mango::id(), config.clone())
-                .await?;
-
-            while let Some(payload) = stream.next().await {
-                let address = Pubkey::from_str(&payload.value.pubkey).unwrap();
-
-                if !addresses.contains(&address) {
-                    continue;
-                }
-
-                let Ok(parsed) = AccountData::from(&payload.value.account).parse() else {
-                    println!("Unable to parse mango book side {}", address);
-                    continue;
-                };
-
-                state_update_sender
-                    .send(StateUpdateMessage::MangoBookSide(address, parsed))
-                    .ok();
-            }
-
-            println!("Mango booksides sub closed");
-        }
-    })
 }

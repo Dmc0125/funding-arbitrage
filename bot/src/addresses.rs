@@ -32,7 +32,7 @@ impl StaticAddresses {
         }
     }
 
-    pub fn get_mango_markets_from_ids(markets_ids: Vec<u16>) -> Vec<Pubkey> {
+    pub fn get_mango_markets_from_ids(markets_ids: &Vec<u16>) -> Vec<Pubkey> {
         markets_ids
             .iter()
             .map(|id| {
@@ -49,7 +49,7 @@ impl StaticAddresses {
             .collect()
     }
 
-    pub fn get_drift_markets_from_ids(markets_ids: Vec<u16>) -> Vec<Pubkey> {
+    pub fn get_drift_markets_from_ids(markets_ids: &Vec<u16>) -> Vec<Pubkey> {
         markets_ids
             .iter()
             .map(|id| {

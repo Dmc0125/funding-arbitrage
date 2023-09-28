@@ -2,3 +2,4 @@
 test-ledger
 .env
 keypair.json
+*.zip

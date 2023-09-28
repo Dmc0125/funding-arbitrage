@@ -22,7 +22,7 @@ use crate::{
     addresses::FundingAccountMeta,
     args::Wallet,
     error::Error,
-    state::{OraclePriceData, State},
+    state::State,
     utils::transaction::{
         build_signed_transaction, force_send_transaction, send_and_confirm_transaction,
         TransactionResult,
@@ -85,8 +85,7 @@ pub async fn initialize_funding_accounts_if_needed(
     Ok(())
 }
 
-const SNAPSHOT_TIMEOUT_SECS: u64 = 1;
-const MAX_SNAPSHOT_STALENESS_SECS: u64 = 15;
+const SNAPSHOT_TIMEOUT_SECS: u64 = 30;
 const RELAYER_SEND_FREQUENCY_SECS: u64 = 10;
 
 struct MarketFundingCache {
@@ -96,7 +95,6 @@ struct MarketFundingCache {
     pub exchange: Exchange,
     pub update_frequency_secs: u64,
 
-    pub last_snapshot_at: Instant,
     pub funding_snapshots: Vec<i64>,
 
     pub last_account_update_at: Instant,
@@ -108,12 +106,6 @@ impl MarketFundingCache {
     }
 
     pub fn insert_funding_rate(&mut self, funding_rate: i64) {
-        self.last_snapshot_at = Instant::now();
-
-        if self.last_snapshot_at.elapsed().as_secs() > MAX_SNAPSHOT_STALENESS_SECS {
-            self.funding_snapshots = vec![];
-        }
-
         if self.funding_snapshots.len() == self.cache_funding_rates() {
             self.funding_snapshots.remove(0);
         }
@@ -136,12 +128,12 @@ pub async fn start_funding_relayer(
     rpc_client: Arc<RpcClient>,
     wallet: Arc<Wallet>,
     state: Arc<State>,
-    funding_accounts_metas: &Vec<FundingAccountMeta>,
 ) -> Result<(JoinHandle<Result<(), Error>>, JoinHandle<Result<(), Error>>), Error> {
     sleep(Duration::from_secs(5)).await;
     let cache: Arc<Mutex<Vec<MarketFundingCache>>> = Default::default();
 
     {
+        let funding_accounts_metas = &state.static_addresses.funding_accounts;
         let ais = rpc_client
             .get_multiple_accounts(
                 &funding_accounts_metas
@@ -163,7 +155,6 @@ pub async fn start_funding_relayer(
                         market_index: meta.market_index,
                         exchange: funding_account.exchange,
                         update_frequency_secs: funding_account.config.update_frequency_secs,
-                        last_snapshot_at: Instant::now(),
                         funding_snapshots: vec![],
                         last_account_update_at: Instant::now(),
                     });
@@ -182,6 +173,10 @@ pub async fn start_funding_relayer(
 
         async move {
             loop {
+                println!("Taking snapshot");
+
+                State::update_for_funding_snapshot(&state).await?;
+
                 let mut cache = cache.lock().await;
 
                 for market_cache in cache.iter_mut() {
@@ -196,16 +191,6 @@ pub async fn start_funding_relayer(
                                 );
                                 continue;
                             };
-
-                            if oracle.updated_at_ts.elapsed().as_secs()
-                                > OraclePriceData::STALENESS_THRESHOLD_SECS
-                            {
-                                println!(
-                                    "Oracle drift {} {} is stale",
-                                    perp_market.market_index, perp_market.amm.oracle
-                                );
-                                continue;
-                            }
 
                             let Ok(price) = oracle.get_drift_price() else {
                                 println!(
@@ -243,16 +228,6 @@ pub async fn start_funding_relayer(
                                 );
                                 continue;
                             };
-
-                            if oracle.updated_at_ts.elapsed().as_secs()
-                                > OraclePriceData::STALENESS_THRESHOLD_SECS
-                            {
-                                println!(
-                                    "Oracle mango {} {} is stale",
-                                    perp_market.perp_market_index, perp_market.oracle
-                                );
-                                continue;
-                            }
 
                             let price = oracle.get_mango_price(perp_market.base_decimals);
                             let now_ts = SystemTime::now()
@@ -297,16 +272,6 @@ pub async fn start_funding_relayer(
                         Exchange::Drift => "drift",
                         Exchange::Mango => "mango",
                     };
-
-                    if market_cache.last_snapshot_at.elapsed().as_secs()
-                        > MAX_SNAPSHOT_STALENESS_SECS
-                    {
-                        println!(
-                            "Cache for market {} {} is stale",
-                            exchange_str, market_cache.market
-                        );
-                        continue;
-                    }
 
                     if market_cache.last_account_update_at.elapsed().as_secs()
                         < market_cache.update_frequency_secs

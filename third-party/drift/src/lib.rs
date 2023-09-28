@@ -1,7 +1,7 @@
 use impl_helpers::{Cast, SafeMath};
 use math::{
-    calculate_funding_payment_in_quote_precision, calculate_new_oracle_price_twap,
-    normalize_oracle_price, sanitize_new_price,
+    calculate_auction_price, calculate_funding_payment_in_quote_precision,
+    calculate_new_oracle_price_twap, normalize_oracle_price, sanitize_new_price, standardize_price,
 };
 
 use crate::math::calculate_funding_rate_from_pnl_limit;
@@ -51,6 +51,7 @@ pub enum DriftError {
     InvalidOracle,
     InvalidMarkTwapUpdateDetected,
     InvalidFundingProfitability,
+    InvalidOracleOffset,
 }
 
 impl ToString for DriftError {
@@ -60,6 +61,7 @@ impl ToString for DriftError {
             Self::InvalidOracle => "InvalidOracle".to_string(),
             Self::InvalidMarkTwapUpdateDetected => "InvalidMarkTwapUpdateDetected".to_string(),
             Self::InvalidFundingProfitability => "InvalidFundingProfitability".to_string(),
+            Self::InvalidOracleOffset => "InvalidOracleOffset".to_string(),
         }
     }
 }
@@ -80,7 +82,7 @@ impl types::Amm {
             .to_u64()
     }
 
-    fn reserve_price(&self) -> DriftResult<u64> {
+    pub fn reserve_price(&self) -> DriftResult<u64> {
         Self::calculate_price(
             self.quote_asset_reserve,
             self.base_asset_reserve,
@@ -672,6 +674,54 @@ impl Default for accounts::PerpMarket {
             padding_1: Default::default(),
             quote_spot_market_index: Default::default(),
             padding: [0; 48],
+        }
+    }
+}
+
+pub fn is_auction_complete(order_slot: u64, auction_duration: u8, slot: u64) -> DriftResult<bool> {
+    if auction_duration == 0 {
+        return Ok(true);
+    }
+
+    let slots_elapsed = slot.safe_sub(order_slot)?;
+
+    Ok(slots_elapsed > auction_duration.cast()?)
+}
+
+impl types::Order {
+    pub fn has_auction_price(
+        &self,
+        order_slot: u64,
+        auction_duration: u8,
+        slot: u64,
+    ) -> DriftResult<bool> {
+        let auction_complete = is_auction_complete(order_slot, auction_duration, slot)?;
+        let has_auction_prices = self.auction_start_price != 0 || self.auction_end_price != 0;
+        Ok(!auction_complete && has_auction_prices)
+    }
+
+    pub fn has_oracle_price_offset(&self) -> bool {
+        self.oracle_price_offset != 0
+    }
+
+    pub fn get_limit_price(
+        &self,
+        oracle_price: i64,
+        slot: u64,
+        tick_size: u64,
+    ) -> DriftResult<u64> {
+        if self.has_auction_price(self.slot, self.auction_duration, slot)? {
+            calculate_auction_price(self, slot, tick_size, oracle_price)
+        } else if self.has_oracle_price_offset() {
+            let limit_price = oracle_price.safe_add(self.oracle_price_offset.cast()?)?;
+
+            if limit_price <= 0 {
+                return Err(DriftError::InvalidOracleOffset);
+            }
+
+            standardize_price(limit_price.cast::<u64>()?, tick_size, self.direction)
+        } else {
+            Ok(self.price)
         }
     }
 }

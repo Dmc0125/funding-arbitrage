@@ -1,9 +1,16 @@
 use solana_client::client_error::ClientError;
 
-use crate::utils::{transaction::TransactionErrorClient, websocket_client::WebsocketError};
+use crate::{
+    args::ParseMarketsError,
+    utils::{transaction::TransactionErrorClient, websocket_client::WebsocketError},
+};
 
 #[derive(Debug)]
 pub enum Error {
+    DriftOrderbookIsEmpty,
+    UnableToGetDriftOrderPrice,
+    UnableToGetDriftAmmPrice,
+
     ServiceShutdownUnexpectedly,
 
     UnableToCreateOutputFile,
@@ -21,6 +28,7 @@ pub enum Error {
     RpcError,
     WebsocketClientError(WebsocketError),
     TransactionErrorClient(TransactionErrorClient),
+    ParseMarketsError(ParseMarketsError),
 }
 
 impl From<ClientError> for Error {
@@ -41,9 +49,18 @@ impl From<TransactionErrorClient> for Error {
     }
 }
 
+impl From<ParseMarketsError> for Error {
+    fn from(value: ParseMarketsError) -> Self {
+        Self::ParseMarketsError(value)
+    }
+}
+
 impl ToString for Error {
     fn to_string(&self) -> String {
         match self {
+            Self::DriftOrderbookIsEmpty => "DriftOrderbookIsEmpty".to_string(),
+            Self::UnableToGetDriftOrderPrice => "UnableToGetDriftOrderPrice".to_string(),
+            Self::UnableToGetDriftAmmPrice => "UnableToGetDriftAmmReservePrice".to_string(),
             Self::ServiceShutdownUnexpectedly => "ServiceShutdownUnexpectedly".to_string(),
             Self::UnableToCreateOutputFile => "UnableToCreateOutputFile".to_string(),
             Self::UnableToLoadOutputFile => "UnableToLoadOutputFile".to_string(),
@@ -56,6 +73,7 @@ impl ToString for Error {
             Self::RpcError => "RpcError".to_string(),
             Self::WebsocketClientError(e) => format!("WebsocketClientError: {}", e.to_string()),
             Self::TransactionErrorClient(e) => format!("TransactionErrorClient: {}", e.to_string()),
+            Self::ParseMarketsError(e) => format!("ParseMarketsError: {}", e.to_string()),
         }
     }
 }

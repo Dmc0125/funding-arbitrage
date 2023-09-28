@@ -316,7 +316,7 @@ pub async fn create_persisted_websocket_connection(
                             continue;
                         };
 
-                        println!("Unusbcribing {}: rid {}", subscription_id, request_id);
+                        println!("Unsubcribing {}: rid {}", subscription_id, request_id);
 
                         let req = SubscribeParams::build_unsubscribe_request(method, request_id);
                         ws.send(Message::Text(req)).await?;
@@ -344,7 +344,8 @@ pub async fn create_persisted_websocket_connection(
                                 ws.send(Message::Pong(data)).await?;
                                 continue;
                             }
-                            Message::Close(_) => {
+                            Message::Close(reason) => {
+                                dbg!(reason);
                                 break;
                             }
                             _ => {

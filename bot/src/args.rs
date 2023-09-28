@@ -23,6 +23,7 @@ pub fn load_and_parse<T, F: Fn(String) -> Result<T, String>>(key: &str, parse_fn
     }
 }
 
+#[derive(Debug)]
 pub struct ParseMarketsError(pub String);
 
 impl ParseMarketsError {
@@ -80,7 +81,11 @@ pub enum Commands {
         output_dir: PathBuf,
     },
 
-    FundingClient,
+    FundingClient {
+        markets: Vec<String>,
+    },
 
-    Bot,
+    Bot {
+        markets: Vec<String>,
+    },
 }

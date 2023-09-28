@@ -3,8 +3,8 @@ use std::cmp::{max, min};
 use crate::{
     constants::{self, AMM_TO_QUOTE_PRECISION_RATIO, FUNDING_RATE_BUFFER, PRICE_PRECISION},
     impl_helpers::{Cast, SafeMath},
-    types::Amm,
-    DriftResult,
+    types::{Amm, Order, OrderType, PositionDirection},
+    DriftError, DriftResult,
 };
 
 pub fn normalize_oracle_price(
@@ -221,4 +221,133 @@ pub fn calculate_funding_rate_from_pnl_limit(
     pnl_limit_biased
         .safe_mul(constants::QUOTE_TO_BASE_AMT_FUNDING_PRECISION)?
         .safe_div(base_asset_amount)
+}
+
+pub fn standardize_price(
+    price: u64,
+    tick_size: u64,
+    direction: PositionDirection,
+) -> DriftResult<u64> {
+    if price == 0 {
+        return Ok(0);
+    }
+
+    let remainder = price
+        .checked_rem_euclid(tick_size)
+        .ok_or(DriftError::MathError)?;
+
+    if remainder == 0 {
+        return Ok(price);
+    }
+
+    match direction {
+        PositionDirection::Long => price.safe_sub(remainder),
+        PositionDirection::Short => price.safe_add(tick_size)?.safe_sub(remainder),
+    }
+}
+
+fn calculate_auction_price_for_fixed_auction(
+    order: &Order,
+    slot: u64,
+    tick_size: u64,
+) -> DriftResult<u64> {
+    let slots_elapsed = slot.safe_sub(order.slot)?;
+
+    let delta_numerator = min(slots_elapsed, order.auction_duration.cast()?);
+    let delta_denominator = order.auction_duration;
+
+    let auction_start_price = order.auction_start_price.cast::<u64>()?;
+    let auction_end_price = order.auction_end_price.cast::<u64>()?;
+
+    if delta_denominator == 0 {
+        return standardize_price(auction_end_price, tick_size, order.direction);
+    }
+
+    let price_delta = match order.direction {
+        PositionDirection::Long => auction_end_price
+            .safe_sub(auction_start_price)?
+            .safe_mul(delta_numerator.cast()?)?
+            .safe_div(delta_denominator.cast()?)?,
+        PositionDirection::Short => auction_start_price
+            .safe_sub(auction_end_price)?
+            .safe_mul(delta_numerator.cast()?)?
+            .safe_div(delta_denominator.cast()?)?,
+    };
+
+    let price = match order.direction {
+        PositionDirection::Long => auction_start_price.safe_add(price_delta)?,
+        PositionDirection::Short => auction_start_price.safe_sub(price_delta)?,
+    };
+
+    standardize_price(price, tick_size, order.direction)
+}
+
+fn calculate_auction_price_for_oracle_offset_auction(
+    order: &Order,
+    slot: u64,
+    tick_size: u64,
+    oracle_price: i64,
+) -> DriftResult<u64> {
+    let slots_elapsed = slot.safe_sub(order.slot)?;
+
+    let delta_numerator = min(slots_elapsed, order.auction_duration.cast()?);
+    let delta_denominator = order.auction_duration;
+
+    let auction_start_price_offset = order.auction_start_price;
+    let auction_end_price_offset = order.auction_end_price;
+
+    if delta_denominator == 0 {
+        let price = oracle_price.safe_add(auction_end_price_offset)?;
+
+        if price <= 0 {
+            return Err(DriftError::InvalidOracleOffset);
+        }
+
+        return standardize_price(price.cast()?, tick_size, order.direction);
+    }
+
+    let price_offset_delta = match order.direction {
+        PositionDirection::Long => auction_end_price_offset
+            .safe_sub(auction_start_price_offset)?
+            .safe_mul(delta_numerator.cast()?)?
+            .safe_div(delta_denominator.cast()?)?,
+        PositionDirection::Short => auction_start_price_offset
+            .safe_sub(auction_end_price_offset)?
+            .safe_mul(delta_numerator.cast()?)?
+            .safe_div(delta_denominator.cast()?)?,
+    };
+
+    let price_offset = match order.direction {
+        PositionDirection::Long => auction_start_price_offset.safe_add(price_offset_delta)?,
+        PositionDirection::Short => auction_start_price_offset.safe_sub(price_offset_delta)?,
+    };
+
+    let price = standardize_price(
+        oracle_price.safe_add(price_offset)?.max(0).cast()?,
+        tick_size,
+        order.direction,
+    )?;
+
+    if price == 0 {
+        return Err(DriftError::InvalidOracleOffset);
+    }
+
+    Ok(price)
+}
+
+pub fn calculate_auction_price(
+    order: &Order,
+    slot: u64,
+    tick_size: u64,
+    oracle_price: i64,
+) -> DriftResult<u64> {
+    match order.order_type {
+        OrderType::Market | OrderType::TriggerMarket | OrderType::Limit => {
+            calculate_auction_price_for_fixed_auction(order, slot, tick_size)
+        }
+        OrderType::Oracle => {
+            calculate_auction_price_for_oracle_offset_auction(order, slot, tick_size, oracle_price)
+        }
+        _ => unreachable!(),
+    }
 }
